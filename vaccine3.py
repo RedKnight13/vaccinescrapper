@@ -1,85 +1,94 @@
 import requests
-from datetime import date,datetime
+import argparse
 import os
-import smtplib
-from time import time,ctime
+import pytz
+import json
+from datetime import datetime, timedelta
+from collections import defaultdict
+
+from tabulate import tabulate
+
+from vaccine_scraper_utils import logging_utils, constants, meta
+
+log = logging_utils.get_logger("vaccine3.py")
+
+timezone = pytz.timezone(constants.TIMEZONE_IN)
+today = datetime.now(timezone).strftime("%d-%m-%Y")
 
 
-minutes = 1
+def get_sessions(state_name, next_seven_days=False):
+    log.info("Looking for sessions today for state : '%s', date: %s", state_name, today)
+    state_code = meta.get_state_code(state_name)
+    if not state_code:
+        log.warning("State code for state '%s' not found", state_name)
+        return
+    log.info("State code for '%s' = %s", state_name, state_code)
+    districts_in_state = meta._list_districts_per_state(state_code=state_code)
+    log.info("Districts in state '%s': %s", state_name, json.dumps(districts_in_state))
+    all_sessions = meta._get_sessions(state_code, today, next_seven_days)
 
-today = date.today()
+    district_keys = sorted(list(set([vaccination_session.get("district_name") for vaccination_session in all_sessions])))
+    log.info("District keys: %s", district_keys)
 
-
-__district = "307" 
-
-'''
-295 - Kasargod
-296 - Thiruvananthapuram
-298 - kollam
-299 - Wayanad
-300 - Pathanamthitta
-302 - Malappuram
-303 - thrissue
-305 - Kozikode
-306- idukki
-307 - ernakulam
-308 - palakkad
-'''
+    sessions_per_district = defaultdict(list)
+    for dk in district_keys:
+        sessions_per_district[dk] = [x for x in all_sessions if x.get("district_name") == dk]
 
 
+    capacities = []
 
-d1 = today.strftime("%d/%m/%Y")
+    for district, sessions in sessions_per_district.items():
+        sessions_per_center_in_district = defaultdict(list)
+        session_centers_in_district = sorted(
+            list(
+                set(
+                    [x.get("name") for x in sessions]
+                )
+            )
+        )
+        for s_center in session_centers_in_district:
+            centers = [x for x in sessions if x.get("name") == s_center]
+            vax_sessions = []
+            for ct in centers:
+                vax_sessions += ct.get("sessions")
+            capacities += [{"available_capacity": x.get("available_capacity"), "date": x.get("date"), "name": s_center, "district": district, "min_age_limit": x.get("min_age_limit")} for x in vax_sessions]
 
-__date = str(d1).replace("/","-")	
+    available_centers = [x for x in capacities if x.get("available_capacity") >= 1]
 
-def parse_json(result):
-	output = []
-	centers = result['centers']
-	for center in centers:
-		sessions = center['sessions']
-		for session in sessions:
-			if session['available_capacity'] > 0:
-				res = { 'name': center['name'], 'block_name':center['block_name'],'age_limit':session['min_age_limit'], 'vaccine_type':session['vaccine'] , 'date':session['date'],'available_capacity':session['available_capacity'] }
-				output.append(res)
-	return output
-				
-	
-def call_api():
-    print((ctime(time())))
-    api = "https://cdn-api.co-vin.in/api/v2/appointment/sessions/public/calendarByDistrict?district_id=" + __district+ "&date="+ __date
+    available_centers = [
+        [
+            x.get("name"),
+            x.get("district"),
+            x.get("available_capacity"),
+            x.get("date"),
+            x.get("min_age_limit")
+        ] for x in available_centers
+    ]
 
-    response = requests.get(api)
+    table_headers = [
+        "Center",
+        "District",
+        "Available",
+        "Date",
+        "Minimum Age Limit"
+    ]
 
-    if response.status_code == 200:
-        print("Status 200 success")
-        result = response.json()
-        output = parse_json(result)
-        if len(output) > 0:
-            print("Vaccines available")
-            print('\007')
-        
-            for center in output:
+    tabulated = tabulate(available_centers, headers=table_headers)
+    print(tabulated)
 
-                print(center['name']) 
-                print ("block:"+center['block_name'])
-                print ("vaccine count:"+str(center['available_capacity']))
-                print ("vaccines type:" + center['vaccine_type'])
-                print (center['date'])
-                print ("age_limit:"+ str(center['age_limit']))
-                print ("---------------------------------------------------------") 
-              
-           
 
-        else:
-            
-            print("Vaccines not available yet \n")
+def main():
+    parser = argparse.ArgumentParser(prog="vaccine3.py")
+    parser.add_argument("-s", "--state", help="Name of the state, in lower case. For example 'andaman and nicobar'", required=True)
+    parser.add_argument("-n", "--next-seven-days", help="Get sessions for the next seven days", action="store_true")
 
-t = datetime.now()
+    args = parser.parse_args()
 
-if __name__ == '__main__':
-    call_api()
-    while True:
-        delta = datetime.now()-t
-        if delta.seconds >= minutes * 60:
-            call_api()
-            t = datetime.now()
+    next_seven_days = args.next_seven_days
+    state = args.state
+
+    get_sessions(state, next_seven_days)
+
+
+if __name__ == "__main__":
+    main()
